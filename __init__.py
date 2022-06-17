@@ -207,7 +207,8 @@ async def cutting(img, mode):
         x, y, w, h = cv2.boundingRect(contours[i])
         #cv2.rectangle(img2, (x, y), (x + w, y + h), (153, 153, 0), 5)
         img3 = img2[y + 2:y + h - 2, x + 2:x + w - 2]
-        return Image.fromarray(img3), [x, y, w, h]
+        img4 = Image.fromarray(img3)
+        return img4, [x, y, w, h]
     if mode == 2:
         if icon_area == {}:
             return False
@@ -241,31 +242,37 @@ async def getPos(img):
         if border == False:
             bo = True
         else:
-            border = sorted(border, key=lambda x: x[0] * 10000 + x[1])
-            xpos = 1
+            border = sorted(border, key=lambda x: (10000 - x[0]) * 10000 + x[1])
+            x, y, w, h = border[0]  # 列 行 宽 长
+            img_border = img.crop([x + 2, y + 2, x + w - 2, y + h - 2])
+            xpos = 1  # 列
             xlast = border[0][0]
-            ypos = 1
+            ypos = 1  # 行
             ylast = border[0][1]
             outpDict = {}
-            for i in border:
-                x, y, w, h = i
-                if y / ylast > 1.1:
-                    ypos += 1
-                elif x / xlast > 1.1:
-                    ypos = 1
-                    xpos += 1
-                xlast = x
-                ylast = y
-                cropped = img.crop([x + 2, y + 2, x + w - 2, y + h - 2])
-                unit_id, unit_name = await getUnit(cropped)
-                if unit_name == "Unknown" or unit_id == 0:
-                    pass
-                else:
-                    if ypos in outpDict:
-                        outpDict[ypos].append([unit_id, unit_name])
-                    else:
-                        outpDict[ypos] = [[unit_id, unit_name]]
             if len(border) >= 5:
+                print(f'border={border}')
+                for i in border:
+                    x, y, w, h = i
+                    # print(abs(y - ylast), abs(x - xlast), h // 2, w // 2)
+                    if abs(x - xlast) > w // 2:
+                        ypos = 1
+                        xpos += 1
+
+                    elif abs(y - ylast) > h // 2:
+                        ypos += 1
+                    xlast = x
+                    ylast = y
+                    if ypos in outpDict and len(outpDict[ypos]) >= 5:
+                        continue
+                    cropped = img.crop([x + 2, y + 2, x + w - 2, y + h - 2])
+                    unit_id, unit_name = await getUnit(cropped)
+                    if unit_name == "Unknown" or unit_id == 0:
+                        pass
+                    else:
+                        # print(ypos, xpos, unit_name, unit_id)
+                        outpDict[ypos] = [[unit_id, unit_name]] + outpDict.get(ypos, [])
+
                 outpDict = list(sorted(outpDict.items(), key=lambda x: x[0]))
                 outpList = []
                 outpName = []
@@ -283,7 +290,8 @@ async def getPos(img):
                 # print(outpList)
                 outpName = "识别阵容为：\n" + '\n'.join(outpName)
                 # print(outpName)
-                return outpList, outpName
+                if outpList != []:
+                    return outpList, outpName
 
         im_grey, border = await cutting(im_grey, 1)
         if cnt == 1 or bo:
