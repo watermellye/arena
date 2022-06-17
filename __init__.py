@@ -242,7 +242,7 @@ async def getPos(img):
         if border == False:
             bo = True
         else:
-            border = sorted(border, key=lambda x: (10000 - x[0]) * 10000 + x[1])
+            border = sorted(border, key=lambda x: x[1] - x[0] * 10000)
             x, y, w, h = border[0]  # 列 行 宽 长
             img_border = img.crop([x + 2, y + 2, x + w - 2, y + h - 2])
             xpos = 1  # 列
@@ -251,10 +251,9 @@ async def getPos(img):
             ylast = border[0][1]
             outpDict = {}
             if len(border) >= 5:
-                print(f'border={border}')
                 for i in border:
                     x, y, w, h = i
-                    # print(abs(y - ylast), abs(x - xlast), h // 2, w // 2)
+
                     if abs(x - xlast) > w // 2:
                         ypos = 1
                         xpos += 1
@@ -270,7 +269,6 @@ async def getPos(img):
                     if unit_name == "Unknown" or unit_id == 0:
                         pass
                     else:
-                        # print(ypos, xpos, unit_name, unit_id)
                         outpDict[ypos] = [[unit_id, unit_name]] + outpDict.get(ypos, [])
 
                 outpDict = list(sorted(outpDict.items(), key=lambda x: x[0]))
@@ -319,6 +317,19 @@ async def getUnit(img2):
 
     lis = list(sorted(dic.items(), key=lambda x: abs(x[1])))
     if int(lis[0][1]) <= 92:
+        mi = int(lis[0][1])
+        for uid6, similarity in lis:
+            uid = int(uid6) // 100
+            similarity = int(similarity)
+            if abs(similarity - mi) > 10:
+                break
+            name = "Unknown"
+            try:
+                nam = chara.fromid(uid).name
+            except:
+                pass
+            print(f'{nam} {str(uid6)[-2]}x {100-similarity}% {uid6}')
+        print()
         uid = int(lis[0][0]) // 100
         if int(lis[0][0]) == 108231 and int(lis[1][0]) == 100731 and int(lis[1][1]) - int(lis[0][1]) <= 5:
             uid = 1007
@@ -351,8 +362,8 @@ async def _arena_query(bot, ev: CQEvent, region: int):
         boxDict, s = await getBox(image)
         if boxDict == []:
             await bot.finish(ev, "未识别到角色！")
-        print(s)
-        print(boxDict)
+        # print(s)
+        # print(boxDict)
         try:
             await bot.send(ev, s)
         except:
@@ -385,7 +396,7 @@ async def _arena_query(bot, ev: CQEvent, region: int):
                     li.append(copy.deepcopy(squads))
                 lis.append(copy.deepcopy(li))
             await asyncio.sleep(2)
-        print(lis)
+        # print(lis)
         if tot == 0:
             await bot.finish(ev, "均未查询到解法！")
         if tot == 1:
