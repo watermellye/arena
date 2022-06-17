@@ -74,7 +74,7 @@ async def arena_query_jp(bot, ev):
     await _arena_query(bot, ev, region=4)
 
 
-def render_atk_def_teams(entries, border_pix=5):
+async def render_atk_def_teams(entries, border_pix=5):
     n = len(entries)
     icon_size = 64
     im = Image.new('RGBA', (5 * icon_size + 100, n * (icon_size + border_pix) - border_pix), (255, 255, 255, 255))
@@ -84,11 +84,15 @@ def render_atk_def_teams(entries, border_pix=5):
         y1 = i * (icon_size + border_pix)
         y2 = y1 + icon_size
         for j, c in enumerate(e['atk']):
-            # print(c)
-            icon = c.render_icon(icon_size)
             x1 = j * icon_size
             x2 = x1 + icon_size
-            im.paste(icon, (x1, y1, x2, y2), icon)
+            try:
+                icon = await c.render_icon(icon_size)  # 如使用旧版hoshino（不返回结果），请去掉await
+                im.paste(icon, (x1, y1, x2, y2), icon)
+            except:
+                icon = c.render_icon(icon_size)
+                im.paste(icon, (x1, y1, x2, y2), icon)
+
         thumb_up = thumb_up_a if e['user_like'] > 0 else thumb_up_i
         thumb_down = thumb_down_a if e['user_like'] < 0 else thumb_down_i
         x1 = 5 * icon_size + 10
@@ -102,9 +106,9 @@ def render_atk_def_teams(entries, border_pix=5):
     return im
 
 
-def getBox(img):
+async def getBox(img):
     img = img.convert("RGBA")
-    boxDict, s = getPos(img)
+    boxDict, s = await getPos(img)
     return boxDict, s
 
 
@@ -114,26 +118,24 @@ dataDir = join(curpath, 'dic.npy')
 if not exists(dataDir):
     update_dic()
 data = np.load(dataDir, allow_pickle=True).item()
+data_processed = None
 
 
-def getBoxPos(uid):
-    if uid >= 1000 and uid <= 1156:
-        return uid - 1000  # 0-157
-    elif uid >= 1701 and uid <= 1702:
-        return uid - 1544  # 157-158
-    elif uid >= 1801 and uid <= 1805:
-        return uid - 1642  # 159-163
-    return 0
+def process_data():
+    global data, data_processed
+    data_processed = {}
+    for uid in data:
+        data_processed[uid] = Image.fromarray(data[uid][25:96, 8:97, :])
 
 
-def cut_image(image, hash_size=16):
+async def cut_image(image, hash_size=16):
     # 将图像缩小成(16+1)*16并转化成灰度图
     image1 = image.resize((hash_size + 1, hash_size), Image.ANTIALIAS).convert('L')
     pixel = list(image1.getdata())
     return pixel
 
 
-def trans_hash(lists):
+async def trans_hash(lists):
     # 比较列表中相邻元素大小
     j = len(lists) - 1
     hash_list = []
@@ -148,7 +150,7 @@ def trans_hash(lists):
     return hash_list
 
 
-def difference_value(image_lists):
+async def difference_value(image_lists):
     # 获得图像差异值并获得指纹
     assert len(image_lists) == 17 * 16, "size error"
     m, n = 0, 17
@@ -156,23 +158,23 @@ def difference_value(image_lists):
     for i in range(0, 16):
         slc = slice(m, n)
         image_slc = image_lists[slc]
-        hash_list.append(trans_hash(image_slc))
+        hash_list.append(await trans_hash(image_slc))
         m += 17
         n += 17
     return hash_list
 
 
-def calc_distance(image1, image2):
-    image1_lists = cut_image(image1)
-    image2_lists = cut_image(image2)
-    hash_lists1 = difference_value(image1_lists)
-    hash_lists2 = difference_value(image2_lists)
+async def calc_distance(image1, image2):
+    image1_lists = await cut_image(image1)
+    image2_lists = await cut_image(image2)
+    hash_lists1 = await difference_value(image1_lists)
+    hash_lists2 = await difference_value(image2_lists)
     calc = abs(np.array(hash_lists2) - np.array(hash_lists1))
     calc = sum(sum(calc))
     return calc
 
 
-def cutting(img, mode):
+async def cutting(img, mode):
     im_grey = img.convert('L')
     totArea = (im_grey.size)[0] * (im_grey.size)[1]
     im_grey = im_grey.point(lambda x: 255 if x > 210 else 0)
@@ -221,7 +223,7 @@ def cutting(img, mode):
         return icon
 
 
-def cut(img, border):
+async def cut(img, border):
     x, y, w, h = border
     img = np.array(img)
     img = img[y + 2:y + h - 2, x + 2:x + w - 2]
@@ -229,13 +231,13 @@ def cut(img, border):
     return img
 
 
-def getPos(img):
+async def getPos(img):
     im_grey = img
     cnt = 0
     while cnt <= 5:
         bo = False
         cnt += 1
-        border = cutting(im_grey, 2)
+        border = await cutting(im_grey, 2)
         if border == False:
             bo = True
         else:
@@ -255,7 +257,7 @@ def getPos(img):
                 xlast = x
                 ylast = y
                 cropped = img.crop([x + 2, y + 2, x + w - 2, y + h - 2])
-                unit_id, unit_name = getUnit(cropped)
+                unit_id, unit_name = await getUnit(cropped)
                 if unit_name == "Unknown" or unit_id == 0:
                     pass
                 else:
@@ -283,22 +285,30 @@ def getPos(img):
                 # print(outpName)
                 return outpList, outpName
 
-        im_grey, border = cutting(im_grey, 1)
+        im_grey, border = await cutting(im_grey, 1)
         if cnt == 1 or bo:
             im_grey = im_grey.point(lambda x: 0 if x > 128 else 255)
-        img = cut(img, border)
+        img = await cut(img, border)
     return [], []
 
 
-def getUnit(img2):
+async def getUnit(img2):
     img2 = img2.convert("RGB").resize((128, 128), Image.ANTIALIAS)
     img3 = np.array(img2)
     img4 = img3[25:96, 8:97, :]
     img4 = Image.fromarray(img4)
     dic = {}
+    global data, data_processed
+    if data_processed == None:
+        process_data()
+
+    tasks = []
     for uid in data:
-        icon = Image.fromarray(data[uid][25:96, 8:97, :])
-        dic[uid] = calc_distance(icon, img4)
+        tasks.append(calc_distance(data_processed[uid], img4))
+    ret = await asyncio.gather(*tasks)
+    for index, uid in enumerate(data):
+        dic[uid] = ret[index]
+
     lis = list(sorted(dic.items(), key=lambda x: abs(x[1])))
     if int(lis[0][1]) <= 92:
         uid = int(lis[0][0]) // 100
@@ -312,7 +322,7 @@ def getUnit(img2):
     return 0, "Unknown"
 
 
-def get_pic(address):
+async def get_pic(address):
     return requests.get(address, timeout=20).content
 
 
@@ -329,8 +339,8 @@ async def _arena_query(bot, ev: CQEvent, region: int):
     ret = re.match(r"\[CQ:image,file=(.*),url=(.*)\]", str(ev.message))
     if ret:
         await bot.send(ev, "recognizing")
-        image = Image.open(BytesIO(get_pic(ret.group(2))))
-        boxDict, s = getBox(image)
+        image = Image.open(BytesIO(await get_pic(ret.group(2))))
+        boxDict, s = await getBox(image)
         if boxDict == []:
             await bot.finish(ev, "未识别到角色！")
         print(s)
@@ -478,7 +488,7 @@ async def __arena_query(bot, ev: CQEvent, region: int, defen="", raw=0):
 
     # 发送回复
     sv.logger.info('Arena generating picture...')
-    teams = render_atk_def_teams(res)
+    teams = await render_atk_def_teams(res)
     teams = pic2b64(teams)
     teams = MessageSegment.image(teams)
     sv.logger.info('Arena picture ready!')
@@ -549,8 +559,10 @@ async def _update_dic(bot, ev):
         await bot.send(ev, f'{update_dic()}')
         global data
         data = np.load(dataDir, allow_pickle=True).item()
+        process_data()
     except Exception as e:
         await bot.send(ev, f'Error: {e}')
+
 
 @sv.scheduled_job('cron', hour='3', minute='21')
 async def _update_dic_cron():
@@ -560,6 +572,7 @@ async def _update_dic_cron():
         data = np.load(dataDir, allow_pickle=True).item()
     except Exception as e:
         pass
+
 
 @sv.on_command('arena-upload', aliases=('上传作业', '作业上传', '上傳作業', '作業上傳'))
 async def upload(ss: CommandSession):
