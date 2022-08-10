@@ -74,6 +74,11 @@ async def arena_query_jp(bot, ev):
     await _arena_query(bot, ev, region=4)
 
 
+@sv.on_prefix(('tjjc'))
+async def arena_query_test(bot, ev):
+    await _arena_query(bot, ev, region=-20)
+
+
 async def render_atk_def_teams(entries, border_pix=5):
     n = len(entries)
     icon_size = 64
@@ -121,13 +126,6 @@ data = np.load(dataDir, allow_pickle=True).item()
 data_processed = None
 
 
-def process_data():
-    global data, data_processed
-    data_processed = {}
-    for uid in data:
-        data_processed[uid] = Image.fromarray(data[uid][25:96, 8:97, :])
-
-
 async def cut_image(image, hash_size=16):
     # 将图像缩小成(16+1)*16并转化成灰度图
     image1 = image.resize((hash_size + 1, hash_size), Image.ANTIALIAS).convert('L')
@@ -164,14 +162,23 @@ async def difference_value(image_lists):
     return hash_list
 
 
-async def calc_distance(image1, image2):
-    image1_lists = await cut_image(image1)
-    image2_lists = await cut_image(image2)
-    hash_lists1 = await difference_value(image1_lists)
-    hash_lists2 = await difference_value(image2_lists)
-    calc = abs(np.array(hash_lists2) - np.array(hash_lists1))
-    calc = sum(sum(calc))
-    return calc
+async def get_hash_arr(image):
+    return np.array(await difference_value(await cut_image(image)))
+
+
+async def calc_distance_arr(arr1, arr2):
+    return sum(sum(abs(arr1 - arr2)))
+
+
+async def calc_distance_img(image1, image2):
+    return await calc_distance_arr(await get_hash_arr(image2) - await get_hash_arr(image1))
+
+
+async def process_data():
+    global data, data_processed
+    data_processed = {}
+    for uid in data:
+        data_processed[uid] = await get_hash_arr(Image.fromarray(data[uid][25:96, 8:97, :]))
 
 
 async def cutting(img, mode):
@@ -304,16 +311,13 @@ async def getUnit(img2):
     img4 = img3[25:96, 8:97, :]
     img4 = Image.fromarray(img4)
     dic = {}
-    global data, data_processed
+    global data_processed
     if data_processed == None:
-        process_data()
+        await process_data()
 
-    tasks = []
-    for uid in data:
-        tasks.append(calc_distance(data_processed[uid], img4))
-    ret = await asyncio.gather(*tasks)
-    for index, uid in enumerate(data):
-        dic[uid] = ret[index]
+    img4_arr = await get_hash_arr(img4)
+    for uid in data_processed:
+        dic[uid] = await calc_distance_arr(data_processed[uid], img4_arr)
 
     lis = list(sorted(dic.items(), key=lambda x: abs(x[1])))
     if int(lis[0][1]) <= 92:
@@ -368,6 +372,10 @@ async def _arena_query(bot, ev: CQEvent, region: int):
             await bot.send(ev, s)
         except:
             pass
+
+        if region == -20:
+            return
+
         lis = []  # [[[第1队第1解],[第1队第2解]], [[第2队第1解]], []]
         if len(boxDict) == 1:
             await __arena_query(bot, ev, region, boxDict[0])
@@ -578,7 +586,7 @@ async def _update_dic(bot, ev):
         await bot.send(ev, f'{update_dic()}')
         global data
         data = np.load(dataDir, allow_pickle=True).item()
-        process_data()
+        await process_data()
     except Exception as e:
         await bot.send(ev, f'Error: {e}')
 
@@ -589,6 +597,7 @@ async def _update_dic_cron():
         update_dic()
         global data
         data = np.load(dataDir, allow_pickle=True).item()
+        await process_data()
     except Exception as e:
         pass
 
