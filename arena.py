@@ -1,11 +1,4 @@
-import asyncio
-import base64
-import os
-import time
-from collections import defaultdict
-
 from hoshino import aiorequests, config, util
-
 from .. import chara
 from . import sv
 
@@ -14,113 +7,115 @@ try:
 except:
     import json
 
+import asyncio
+import time
 from os.path import dirname, join, exists
-from os import remove
+from random import random
+from math import log
+
 from asyncio import Lock
 
 querylock = Lock()
-
 logger = sv.logger
-"""
-Database for arena likes & dislikes
-DB is a dict like: { 'md5_id': {'like': set(qq), 'dislike': set(qq)} }
-"""
-DB_PATH = os.path.expanduser("~/.hoshino/arena_db.json")
-DB = {}
-try:
-    with open(DB_PATH, encoding="utf8") as f:
-        DB = json.load(f)
-    for k in DB:
-        DB[k] = {
-            "like": set(DB[k].get("like", set())),
-            "dislike": set(DB[k].get("dislike", set())),
-        }
-except FileNotFoundError:
-    logger.warning(f"arena_db.json not found, will create when needed.")
 
-
-def dump_db():
-    """
-    Dump the arena databese.
-    json do not accept set object, this function will help to convert.
-    """
-    j = {}
-    for k in DB:
-        j[k] = {
-            "like": list(DB[k].get("like", set())),
-            "dislike": list(DB[k].get("dislike", set())),
-        }
-    with open(DB_PATH, "w", encoding="utf8") as f:
-        json.dump(j, f, ensure_ascii=False)
-
-
-def get_likes(id_):
-    return DB.get(id_, {}).get("like", set())
-
-
-def add_like(id_, uid):
-    e = DB.get(id_, {})
-    l = e.get("like", set())
-    k = e.get("dislike", set())
-    l.add(uid)
-    k.discard(uid)
-    e["like"] = l
-    e["dislike"] = k
-    DB[id_] = e
-
-
-def get_dislikes(id_):
-    return DB.get(id_, {}).get("dislike", set())
-
-
-def add_dislike(id_, uid):
-    e = DB.get(id_, {})
-    l = e.get("like", set())
-    k = e.get("dislike", set())
-    l.discard(uid)
-    k.add(uid)
-    e["like"] = l
-    e["dislike"] = k
-    DB[id_] = e
-
-
-_last_query_time = 0
-quick_key_dic = {}  # {quick_key: true_id}
-
-
-def refresh_quick_key_dic():
-    global _last_query_time
-    now = time.time()
-    if now - _last_query_time > 300:
-        quick_key_dic.clear()
-    _last_query_time = now
-
-
-def gen_quick_key(true_id: str, user_id: int) -> str:
-    qkey = int(true_id[-6:], 16)
-    while qkey in quick_key_dic and quick_key_dic[qkey] != true_id:
-        qkey = (qkey + 1) & 0xFFFFFF
-    quick_key_dic[qkey] = true_id
-    mask = user_id & 0xFFFFFF
-    qkey ^= mask
-    return base64.b32encode(qkey.to_bytes(3, "little")).decode()[:5]
-
-
-def get_true_id(quick_key: str, user_id: int) -> str:
-    mask = user_id & 0xFFFFFF
-    if not isinstance(quick_key, str) or len(quick_key) != 5:
-        return None
-    qkey = (quick_key + "===").encode()
-    qkey = int.from_bytes(base64.b32decode(qkey, casefold=True, map01=b"I"), "little")
-    qkey ^= mask
-    return quick_key_dic.get(qkey, None)
+curpath = dirname(__file__)
+bufferpath = join(curpath, 'buffer/buffer.json')
 
 
 def __get_auth_key():
     return config.priconne.arena.AUTH_KEY
 
 
-async def do_query(id_list, user_id, region=1, raw=0, try_cnt=1):
+def id_list2str(id_list: list) -> str:  # [1001, 1002, 1018, 1052, 1122] -> "10011002101810521122"
+    return ''.join([str(x) for x in id_list])
+
+
+def id_str2list(id_str: str) -> list:  # 20~21位str
+    if len(id_str) not in [20, 21]:
+        return []
+    return [int(id_str[x:x + 4]) for x in range(0, 20, 4)]
+
+
+def findApproximateTeamResult(id_list):
+    if len(id_list) == 4:
+        id_list.append(1000)
+    if len(id_list) != 5:
+        raise
+    logger.info(f'查询近似解：{list(sorted(id_list))}')
+    buffer = {}
+    result = []
+    with open(bufferpath, 'r', encoding="utf-8") as fp:
+        buffer = json.load(fp)
+    for buffer_id_str in buffer:  # "100110021018105211222"
+        if len(buffer_id_str) != 21:
+            continue
+        if buffer_id_str[-1] not in ["1", "2"]:
+            continue
+        buffer_id_list = id_str2list(buffer_id_str)  # [1001, 1002, 1018, 1052, 1122]
+        if len(set(buffer_id_list) & set(id_list)) >= 4:
+            pa = join(curpath, f'buffer/{buffer_id_str}.json')
+            if exists(pa):
+                # logger.info(f'找到近似解：{list(sorted(buffer_id_list))} region={buffer_id_str[-1]}')
+                with open(pa, 'r', encoding="utf-8") as fp:
+                    result += json.load(fp)
+
+    logger.info(f'    共有{len(result)}条记录')
+    render = result2render(result, "approximation", id_list)
+    if len(render) > 10:
+        render = list(sorted(render, key=lambda x: x.get("val", -100), reverse=True))[:10]
+    return render
+
+
+def caculateVal(record) -> float:
+    up_vote = int(record["up"])
+    down_vote = int(record["down"])
+    val_1 = up_vote / (down_vote + up_vote + 0.0001) * 2 - 1  # 赞踩比占比 [-1, 1]
+    val_2 = log(up_vote + down_vote + 0.01, 100)  # 置信度占比（log(100)）[-1,+inf]
+    return val_1 + val_2 + random() / 1000  # 阵容推荐度权值
+
+
+def result2render(result, team_type="normal", id_list=[]):
+    '''
+    team_type:
+    "normal":正常查询的阵容
+    "approximation":根据近似解推荐的阵容 由id_list字段自动计算uid_4_1 uid_4_2
+
+    "approximation uid_4_1 uid_4_2":根据近似解推荐的阵容 原查询角色uid_4_1 被替换为 近似查询角色uid_4_2 # 本函数不支持
+    "frequency":根据频率推荐的阵容 # 本函数不支持
+    "youshu":五个佑树 # 本函数不支持
+    '''
+    render = []
+    for entry in result:
+        # atk up down val: 都一样
+        # team_type: approximation要手动算 nomal直接贴
+        write_type = team_type
+        if team_type == "approximation":
+            try:
+                entry_id_list = [c["id"] // 100 for c in entry["def"]]
+                uid_4_1 = list(set(id_list) - set(entry_id_list))[0]
+                uid_4_2 = list(set(entry_id_list) - set(id_list))[0]
+                write_type = f'approximation {uid_4_1} {uid_4_2}'
+            except:
+                pass
+
+        render.append({
+            "atk": [chara.fromid(c["id"] // 100, c["star"], c["equip"]) for c in entry["atk"]],
+            "up": entry["up"],
+            "down": entry["down"],
+            "val": caculateVal(entry),
+            "team_type": write_type
+        })
+
+    return render
+    # return [{"atk": [chara.fromid(c["id"] // 100, c["star"], c["equip"]) for c in entry["atk"]], "up": entry["up"], "down": entry["down"], "val": caculateVal(entry), "team_type": team_type} for entry in result]
+
+
+async def do_query(id_list, region=1, try_cnt=1):
+    if len(id_list) < 4 or len(id_list) > 5:
+        return []
+    if len(id_list) == 4:
+        return findApproximateTeamResult(id_list)
+
     defen = id_list
     key = ''.join([str(x) for x in sorted(defen)]) + str(region)
     if try_cnt <= 1:
@@ -131,14 +126,11 @@ async def do_query(id_list, user_id, region=1, raw=0, try_cnt=1):
         logger.info(f'查询阵容：{key} 仅使用缓存')
     value = int(time.time())
 
-    curpath = dirname(__file__)
-    bufferpath = join(curpath, 'buffer/buffer.json')
-
     buffer = {}
     with open(bufferpath, 'r', encoding="utf-8") as fp:
         buffer = json.load(fp)
 
-    if (value - buffer.get(key, 0) < 3600 * 24) and (exists(join(curpath, f'buffer/{key}.json'))):  # 24h内查询过 直接返回
+    if (value - buffer.get(key, 0) < 3600 * 24 * 5) and (exists(join(curpath, f'buffer/{key}.json'))):  # 5天内查询过 直接返回
         logger.info(f'    存在本服({region})近缓存，直接使用')
         with open(join(curpath, f'buffer/{key}.json'), 'r', encoding="utf-8") as fp:
             result = json.load(fp)
@@ -192,7 +184,7 @@ async def do_query(id_list, user_id, region=1, raw=0, try_cnt=1):
                 should_sleep = True  # 旨在不要连续调用api
             async with querylock:
                 if should_sleep:
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(1)
                 res = None
                 try:
                     resp = await aiorequests.post(
@@ -212,12 +204,8 @@ async def do_query(id_list, user_id, region=1, raw=0, try_cnt=1):
                         logger.info("    查询失败，使用缓存")
                         result = degrade_result
                     else:
-                        if try_cnt < 2:
-                            logger.info("    查询失败，再次查询")
-                            query_again = True
-                        else:
-                            logger.info("    查询失败，返回None")
-                            return None
+                        logger.info("    查询失败，查询近似解")
+                        return findApproximateTeamResult(id_list)
                 else:
                     logger.info(f'    查询成功，共有{len(result)}条结果')
                     if len(result):
@@ -235,39 +223,13 @@ async def do_query(id_list, user_id, region=1, raw=0, try_cnt=1):
                             logger.info(f'    使用缓存')
                             result = degrade_result
                         else:
-                            if try_cnt < 2 and region != 1:
-                                logger.info(f'    尝试查询全服结果')
-                                region = 1
-                                query_again = True
-                            else:
-                                logger.info(f'    返回[]')
-                                return []
+                            logger.info(f'    查询近似解')
+                            return findApproximateTeamResult(id_list)
+
             if query_again:
                 await asyncio.sleep(1)
-                return await do_query(id_list, user_id, region, raw, try_cnt + 1)
-    ret = []
-    for entry in result:
-        eid = entry["id"]
-        likes = get_likes(eid)
-        dislikes = get_dislikes(eid)
-        ret.append({
-            "qkey": gen_quick_key(eid, user_id),
-            "atk": [chara.fromid(c["id"] // 100, c["star"], c["equip"]) for c in entry["atk"]],
-            "def": [chara.fromid(c["id"] // 100, c["star"], c["equip"]) for c in entry["def"]],
-            "up": entry["up"],
-            "down": entry["down"],
-            "my_up": len(likes),
-            "my_down": len(dislikes),
-            "user_like": 1 if user_id in likes else -1 if user_id in dislikes else 0,
-        })
-    logger.info(f'    共有{len(ret)}条结果')
-    return ret
+                return await do_query(id_list, region, try_cnt + 1)
 
-
-async def do_like(qkey, user_id, action):
-    true_id = get_true_id(qkey, user_id)
-    if true_id is None:
-        raise KeyError
-    add_like(true_id, user_id) if action > 0 else add_dislike(true_id, user_id)
-    dump_db()
-    # TODO: upload to website
+    render = result2render(result)
+    logger.info(f'    共有{len(render)}条结果')
+    return render

@@ -39,10 +39,13 @@
 > 
 > ![](images/pjjc1.png)
 
-> 其它
-> 
-> ![](images/other1.png)
+> 近似解查询
+>
+> ![](images/approx.png)
 
+> 各种情况混搭
+>
+> ![](images/misc.png)
 
 ————以下为原README————
 

@@ -7,20 +7,21 @@ from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont, ImageColor
 
 import hoshino
-from hoshino import Service, R
+from hoshino import Service, R, aiorequests
 from hoshino.typing import *
 from hoshino.util import FreqLimiter, concat_pic, pic2b64, silence
 
 from .. import chara
 from .. import _pcr_data
-from .record import update_dic
+from .record import update_dic, update_record
 from os.path import dirname, join, exists
-from os import remove
+from os import remove, listdir
 import numpy as np
 import json
 from io import BytesIO
 import requests
 import copy
+from math import log
 
 import cv2
 
@@ -94,20 +95,21 @@ async def render_atk_def_teams(entries, border_pix=5):
     '''
     n = len(entries)
     icon_size = 64
+    small_icon_size = 32
     im = Image.new('RGBA', (5 * icon_size + 100, n * (icon_size + border_pix) - border_pix), (255, 255, 255, 255))
     font = ImageFont.truetype('msyh.ttc', 16)
     draw = ImageDraw.Draw(im)
     for i, e in enumerate(entries):
-        if len(e) == 0:
+        if len(e) == 0:  # [] 视为空行
             continue
 
         y1 = i * (icon_size + border_pix)
         y2 = y1 + icon_size
-        ee = True
-        if e == "placeholder":
-            ee = False
-            e = {'atk': [chara.fromid(9000) for _ in range(5)]}
 
+        if e == "placeholder":  # 输出五个佑树
+            e = {'atk': [chara.fromid(9000) for _ in range(5)], "team_type": "youshu"}
+
+        # e此时只能是dict了
         for j, c in enumerate(e['atk']):
             x1 = j * icon_size
             x2 = x1 + icon_size
@@ -118,19 +120,37 @@ async def render_atk_def_teams(entries, border_pix=5):
                 icon = c.render_icon(icon_size)
                 im.paste(icon, (x1, y1, x2, y2), icon)
 
-        if ee:
-            #thumb_up = thumb_up_a if e['user_like'] > 0 else thumb_up_i
-            thumb_up = thumb_up_a
-            #thumb_down = thumb_down_a if e['user_like'] < 0 else thumb_down_i
-            thumb_down = thumb_down_a
-            x1 = 5 * icon_size + 10
+        x1 = 5 * icon_size + 10
+        if e["team_type"] == "normal":
             x2 = x1 + 16
-            im.paste(thumb_up, (x1, y1 + 12, x2, y1 + 28), thumb_up)
-            im.paste(thumb_down, (x1, y1 + 39, x2, y1 + 55), thumb_down)
-            #draw.text((x1, y1), e['qkey'], (0, 0, 0, 255), font)
+            try:
+                im.paste(thumb_up_a, (x1, y1 + 12, x2, y1 + 28), thumb_up_a)
+            except:
+                draw.text((x1, y1 + 10), f"赞", (0, 0, 0, 255), font)
+            try:
+                im.paste(thumb_down_a, (x1, y1 + 39, x2, y1 + 55), thumb_down_a)
+            except:
+                draw.text((x1, y1 + 35), f"踩", (0, 0, 0, 255), font)
             draw.text((x1 + 25, y1 + 10), f"{e['up']}", (0, 0, 0, 255), font)
-            #draw.text((x1+25, y1+35), f"{e['down']}+{e['my_down']}" if e['my_down'] else f"{e['down']}", (0, 0, 0, 255), font)
             draw.text((x1 + 25, y1 + 35), f"{e['down']}", (0, 0, 0, 255), font)
+        elif e["team_type"] == "approximation":
+            draw.text((x1, y1 + 22), f"近似解", (0, 0, 0, 255), font)
+        elif "approximation" in e["team_type"]:
+            _, uid_4_1_str, uid_4_2_str = e["team_type"].split(' ')
+            draw.text((x1, y1 - 3), f"近似解", (0, 0, 0, 255), font)
+
+            chara_1 = chara.fromid(int(uid_4_1_str))
+            icon_1 = await chara_1.render_icon(small_icon_size)
+            im.paste(icon_1, (x1, y1 + 26), icon_1)
+
+            draw.text((x1 + 33, y1 + 32), f"→", (0, 0, 0, 255), font)
+
+            chara_2 = chara.fromid(int(uid_4_2_str))
+            icon_2 = await chara_2.render_icon(small_icon_size)
+            im.paste(icon_2, (x1 + 50, y1 + 26), icon_2)
+        elif e["team_type"] == "frequency":
+            draw.text((x1, y1 + 22), f"高频解", (0, 0, 0, 255), font)
+
     return im
 
 
@@ -145,6 +165,12 @@ if not exists(dataDir):
     update_dic()
 data = np.load(dataDir, allow_pickle=True).item()
 data_processed = None
+
+best_atk_records_path = join(curpath, 'buffer/best_atk_records.json')
+if not exists(best_atk_records_path):
+    update_record()
+with open(best_atk_records_path, "r", encoding="utf-8") as fp:
+    best_atk_records = json.load(fp)
 
 
 async def cut_image(image, hash_size=16):
@@ -318,7 +344,7 @@ async def getPos(img: Image):
         else:
             # print(f'cnt={cnt} border={border}') # test
             # 将正方形区域按照行列分组
-            def highlight(rec, color="red"):
+            def highlight(rec, color="red"):  # 识别成功red 被其它代码排除的识别项blue 超过五列未识别的green 识别不出角色的black 识别出是100031的yellow
                 x, y, w, h = rec
                 cropped = img.crop([x + 2, y + 2, x + w - 2, y + h - 2])
                 outpImgText.paste(cropped, (actual_x + x + 2, actual_y + y + 2, actual_x + x + w - 2, actual_y + y + h - 2))
@@ -336,29 +362,18 @@ async def getPos(img: Image):
                 def split_last_col_recs(recs):
                     recs = sorted(recs, key=lambda x: x[0], reverse=True)
                     last_col_recs = [rec for rec in recs if abs(rec[0] - recs[0][0]) < recs[0][2] / 2]
-                    # last_col_recs = []
-                    # for rec in recs:
-                    #     if abs(rec[0] - recs[0][0]) < recs[0][2] / 2:
-                    #         last_col_recs.append(rec)
                     last_col_recs = sorted(last_col_recs, key=lambda x: x[1])
                     return list(set(recs) - set(last_col_recs)), last_col_recs
 
-                recs, last_col_recs = split_last_col_recs(recs)  # 先找出最右侧的一列有几行
+                _, last_col_recs = split_last_col_recs(recs)  # 先找出最右侧的一列有几行
                 row_cnt = len(last_col_recs)
 
                 arr = [[None for __ in range(5)] for _ in range(row_cnt)]
                 arr_id = [[] for _ in range(row_cnt)]
                 arr_id_6 = [[0 for __ in range(5)] for _ in range(row_cnt)]
-                for index, rec in enumerate(last_col_recs):
-                    highlight(rec)
-                    arr[index][0] = rec
-                    x, y, w, h = rec
-                    cropped = img.crop([x + 2, y + 2, x + w - 2, y + h - 2])
-                    uid_6, unit_id, unit_name, similarity = await getUnit(cropped)
-                    arr_id[index].append(unit_id)  # 认为最后一列必须要有角色
-                    arr_id_6[index][0] = uid_6
+                last_col_recs_xpos = [rec[1] for rec in last_col_recs]  # 以最右一列的坐标为基准
 
-                for col_index in range(1, 5):  # 从右往左一列一列掰，最多拿五列
+                for col_index in range(5):  # 从右往左一列一列掰，最多拿五列
                     recs, last_col_recs = split_last_col_recs(recs)
                     if len(last_col_recs) == 0:
                         break
@@ -367,18 +382,19 @@ async def getPos(img: Image):
                         x, y, w, h = rec
                         cropped = img.crop([x + 2, y + 2, x + w - 2, y + h - 2])
                         uid_6, unit_id, unit_name, similarity = await getUnit(cropped)
+                        # print(uid_6, unit_id, unit_name, similarity)  # 0 0 Unknown -1~-5
                         if unit_id == 0:
-                            continue
-                        highlight(rec)
-
-                        most_near_row = 0
-                        for row_index in range(1, len(arr)):
-                            if abs(arr[row_index][0][1] - rec[1]) < abs(arr[most_near_row][0][1] - rec[1]):
-                                most_near_row = row_index
-                        if arr[most_near_row][col_index] is None or abs(arr[most_near_row][0][1] - arr[most_near_row][col_index][1]) > abs(arr[most_near_row][0][1] - rec[1]):
-                            arr[most_near_row][col_index] = rec
-                            arr_id[most_near_row].append(unit_id)
-                            arr_id_6[most_near_row][col_index] = uid_6
+                            highlight(rec, "black")
+                        else:
+                            highlight(rec, "red" if unit_id != 1000 else "yellow")
+                            most_near_row = 0
+                            for row_index in range(1, len(arr)):
+                                if abs(last_col_recs_xpos[row_index] - rec[1]) < abs(last_col_recs_xpos[most_near_row] - rec[1]):
+                                    most_near_row = row_index
+                            if arr[most_near_row][col_index] is None or abs(last_col_recs_xpos[most_near_row] - arr[most_near_row][col_index][1]) > abs(last_col_recs_xpos[most_near_row] - rec[1]):
+                                arr[most_near_row][col_index] = rec
+                                arr_id[most_near_row].append(unit_id)
+                                arr_id_6[most_near_row][col_index] = uid_6
 
                 for rec in recs:
                     highlight(rec, "green")
@@ -388,6 +404,10 @@ async def getPos(img: Image):
                 compare_img = Image.new("RGBA", (icon_size * 5 + 16 * 2, icon_size * 2 * row_cnt + 16 * (row_cnt + 1)), (255, 255, 255, 255))
 
                 for row_index in range(row_cnt):
+                    none_cnt = arr[row_index].count(None)
+                    if none_cnt >= 2:  # 不允许1-3个角色查询 不渲染
+                        arr_id[row_index] = []
+                        continue
                     for col_index in range(5):
                         if arr[row_index][4 - col_index] is None:
                             continue
@@ -408,8 +428,10 @@ async def getPos(img: Image):
 
                 outpImg = Image.blend(outpImg, actual_img, 0.2)
                 outpImg.alpha_composite(outpImgText)
+                ratio = max(1, max((outpImg.size)[0], (outpImg.size)[1]) / 500)
+                outpImg = outpImg.resize((int((outpImg.size)[0] / ratio), int((outpImg.size)[1] / ratio)), Image.ANTIALIAS)
 
-                return arr_id, f'{outp_b64(outpImg)}识别阵容为：{outp_b64(compare_img)}'
+                return arr_id, f'{outp_b64(outpImg)}\n{outp_b64(compare_img)}'
 
         try:
             im_grey, border = await cutting(im_grey, 1)  # 获取图片中最大的长方形区域
@@ -457,11 +479,10 @@ async def getUnit(img2):
 
 
 async def get_pic(address):
-    return requests.get(address, timeout=20).content
+    return await (await aiorequests.get(address, timeout=5)).content
 
 
 async def _arena_query(bot, ev: CQEvent, region: int):
-    arena.refresh_quick_key_dic()
     uid = ev.user_id
 
     if not lmt.check(uid):
@@ -476,9 +497,11 @@ async def _arena_query(bot, ev: CQEvent, region: int):
         boxDict, s = await getBox(image)
 
         if boxDict == []:
-            await bot.finish(ev, "未识别到角色！")
+            await bot.finish(ev, "未识别到有4个及以上角色的阵容！")
 
         try:
+            if region == -20:
+                s += f'\narr_id_4={boxDict}'
             await bot.send(ev, s)
         except:
             pass
@@ -486,126 +509,260 @@ async def _arena_query(bot, ev: CQEvent, region: int):
         if region == -20:
             return
 
-        lis = []  # [[[第1队第1解],[第1队第2解]], [[第2队第1解]], []]
         if len(boxDict) == 1:
             await __arena_query(bot, ev, region, boxDict[0])
             return
+
         if len(boxDict) > 3:
             await bot.finish(ev, "请截图pjjc详细对战记录（对战履历详情）（含敌我双方2或3队阵容）")
-        tot = 0
+
+        team_has_result = 0
         lmt.start_cd(uid)
-        for i in boxDict:
-            li = []
-            res = await __arena_query(bot, ev, region, i, 1)
-            # print(res)
-            if res == []:
-                lis.append([])
-            else:
-                tot += 1
-                for num, squad in enumerate(res):
-                    soutp = ""
-                    squads = []  # [int int int int int 评价 string 原始阵容]
-                    for nam in squad["atk"]:
-                        # print(nam)
-                        soutp += nam.name + " "
-                        squads.append(nam.id)
-                    #squads.append(int(squad["up"]) - int(squad["down"]))
-                    # squads.append(num)
-                    squads.append(int(squad["up"]) * 10 / (int(squad["down"] + int(squad["up"]) + 1)) + random() / 100)
-                    squads.append(soutp[:-1])
-                    squads.append(copy.deepcopy(squad))
-                    li.append(copy.deepcopy(squads))
-                lis.append(copy.deepcopy(li))
-            await asyncio.sleep(2)
-        # print(lis)
-        if tot == 0:
+
+        all_query_records = [[] for _ in range(len(boxDict))]
+        '''
+        [
+            [   
+                [None, -100, None], # 通配，等待从缓存中获取配队
+                [(第1队第1解),权值,render(渲染该队所需数据)]
+                [(第1队第2解),权值,render]
+            ],
+            [
+                [None, -100, None], # 通配
+                [(第2队第1解),权值,render] 
+            ]
+        ]
+        '''
+
+        for query_index, query_team in enumerate(boxDict):
+            all_query_records[query_index].append([None, -100, "placeholder"])
+
+            if len(set(query_team)) == 1 and query_team[0] == 1000:  # 1000 1000 1000 1000 1000 pjjc情况
+                continue
+
+            # if len(query_team) == 4:
+            #     boxDict[query_index].append(1000)
+            #     continue
+
+            records = await __arena_query(bot, ev, region, query_team, 1)
+
+            if records == []:
+                continue
+
+            team_has_result += 1
+
+            for record in records:
+                record_team = tuple([chara_obj.id for chara_obj in record["atk"]])
+                all_query_records[query_index].append([record_team, record["val"], record])
+
+        if team_has_result == 0 and len(boxDict) == 3:
             await bot.finish(ev, "均未查询到解法！")
-        if tot == 1:
-            for num, i in enumerate(lis):
-                if len(i) > 0:
-                    await bot.send(ev, f"仅第{num+1}队查询到解法！")
-                    await __arena_query(bot, ev, region, boxDict[num], only_use_cache=True)  # 历史遗留性质的偷懒，好在使用了缓存
-            return
-        le = len(lis)
-        outp = []
-        outp_priority = []
-        outp_img = []
-        cnt = 0
-        if le == 3:
-            s1 = lis[0]
-            s2 = lis[1]
-            s3 = lis[2]
-            for x in s1:
-                for y in s2:
-                    for z in s3:
-                        temp = x[:-3] + y[:-3] + z[:-3]
-                        if len(temp) == len(set(temp)):
-                            cnt += 1
-                            if cnt <= 8:
-                                outp_img.append([x[-1], y[-1], z[-1]])
-                                outp.append(f"第{1}队：{x[-2]}\n第{2}队：{y[-2]}\n第{3}队：{z[-2]}\n")
-                                outp_priority.append(-(x[-3] + y[-3] + z[-3]))
-                                #outp += f"优先级：{x[-2]+y[-2]+z[-2]:03.1f}\n第{1}队：{x[-1]}\n第{2}队：{y[-1]}\n第{3}队：{z[-1]}\n"
 
-        if outp != []:
-            outp_priority, outp, outp_img = zip(*sorted(zip(outp_priority, outp, outp_img)))
-            outp_render = []
-            for i in outp_img:
-                outp_render += i
-                outp_render.append([])
-            # for i in range(len(outp_priority)):
-            #     print(f'优先级={outp_priority[i]:03.1f}\n阵容=\n{outp[i]}\n原始数据={outp_img[i]}')
-            #outp = "三队无冲配队：\n" + '\n'.join(outp)
-            # await bot.finish(ev, outp)
-            teams = await render_atk_def_teams(outp_render[:-1])
-            teams = pic2b64(teams)
-            teams = MessageSegment.image(teams)
-            await bot.finish(ev, str(teams))
-
-        for i in range(le - 1):
-            for j in range(i + 1, le):
-                s1 = lis[i]
-                s2 = lis[j]
-                for x in s1:
-                    for y in s2:
-                        if not (set(x[:-3]) & set(y[:-3])):
-                            cnt += 1
-                            if cnt < 8:
-                                if le == 2:
-                                    outp_img_space = ["placeholder", "placeholder"]
-                                else:
-                                    outp_img_space = ["placeholder", "placeholder", "placeholder"]
-                                outp_img_space[i] = x[-1]
-                                outp_img_space[j] = y[-1]
-                                outp_img.append(copy.deepcopy(outp_img_space))
-                                outp.append(f"第{i+1}队：{x[-2]}\n第{j+1}队：{y[-2]}\n")
-                                outp_priority.append(-(x[-3] + y[-3]))
-                                #outp += f"优先级：{x[-2]+y[-2]:03.1f}\n第{i+1}队：{x[-1]}\n第{j+1}队：{y[-1]}\n"
-        if outp != []:
-            outp_priority, outp, outp_img = zip(*sorted(zip(outp_priority, outp, outp_img)))
-            outp_render = []
-            for i in outp_img:
-                outp_render += i
-                outp_render.append([])
-            # for i in range(len(outp_priority)):
-            #     print(f'优先级={outp_priority[i]:03.1f}\n阵容=\n{outp[i]}\n原始数据={outp_img[i]}')
-            #outp = "三队无冲配队：\n" + '\n'.join(outp)
-            # await bot.finish(ev, outp)
-            teams = await render_atk_def_teams(outp_render[:-1])
-            teams = pic2b64(teams)
-            teams = MessageSegment.image(teams)
-            await bot.finish(ev, str(teams))
-
-        outp = "不存在无冲配队！"
-        for num, i in enumerate(lis):
-            if i != []:
-                outp += f"\n第{num+1}队的解法为：\n"
-                for j in i:
-                    outp += j[-2] + "\n"
-        await bot.finish(ev, outp.strip())
-
+        await generateCollisionFreeTeam(bot, ev, all_query_records, team_has_result, region, boxDict)  # 最多允许补两队
     else:
         await __arena_query(bot, ev, region)
+
+
+def recommend1Team(already_used_units: List[int]):
+    '''
+    already_used_units: [1110,1008,1011,1026,1089] 不可使用的角色id（四位）
+    return : render | "placeholder"
+    '''
+    global best_atk_records
+    for record_6 in best_atk_records:  # [111451,101261,110351,103461,103261]
+        record_4 = [x // 100 for x in record_6]  # [1114,1012,1103,1034,1032]
+        team_mix = already_used_units + record_4
+        if len(team_mix) == len(set(team_mix)):  # 推荐配队成功
+            return {"atk": [chara.fromid(uid_6 // 100, uid_6 % 100 // 10) for uid_6 in record_6], "team_type": "frequency"}
+    return "placeholder"
+
+
+def recommend2Teams(already_used_units: List[int]):
+    '''
+    return : render, render 或 "placeholder", "placeholder"
+    '''
+    global best_atk_records
+
+    try_combinations = []  # [查询1解序号, 查询2解序号, 优先级]
+    for record_1_index in range(len(best_atk_records) - 1):
+        for record_2_index in range(record_1_index + 1, len(best_atk_records)):
+            try_combinations.append([record_1_index, record_2_index, record_1_index + record_2_index])
+    try_combinations = list(sorted(try_combinations, key=lambda x: x[-1]))
+    for try_combination in try_combinations:
+        record_6_1_index = try_combination[0]  # [111451,101261,110351,103461,103261]
+        record_6_1 = best_atk_records[record_6_1_index]
+        record_4_1 = [x // 100 for x in record_6_1]
+
+        record_6_2_index = try_combination[1]
+        record_6_2 = best_atk_records[record_6_2_index]
+        record_4_2 = [x // 100 for x in record_6_2]
+
+        team_mix = already_used_units + record_4_1 + record_4_2
+        if len(team_mix) == len(set(team_mix)):  # 推荐配队成功
+            # print(f'\n\n成功配队{already_used_units}\n{record_4_1}\n{record_4_2}')  # test
+            return {"atk": [chara.fromid(uid_6 // 100, uid_6 % 100 // 10) for uid_6 in record_6_2], "team_type": "frequency"}, {"atk": [chara.fromid(uid_6 // 100, uid_6 % 100 // 10) for uid_6 in record_6_1], "team_type": "frequency"}
+
+    return "placeholder", "placeholder"
+
+
+async def generateCollisionFreeTeam(bot: HoshinoBot, ev: CQEvent, all_query_records, team_has_result, region, boxDict):
+    '''
+    all_query_records
+    [
+        [
+            [None, -100, "placeholder"], # 通配，等待从缓存中获取配队
+            [(1110,1008,1011,1026,1089), 2.105, render], # [(第1队第1解),权值,render(渲染该队所需数据)]
+            [(1111,1008,1802,1012,1014), 1.152, render] # [(第1队第2解),权值,render]
+        ],
+        [
+            [None, -100, "placeholder"], # 通配
+            [(第2队第1解),权值,render]
+        ]
+    ]
+    '''
+    collision_free_match_cnt = 0
+    outp_render = []
+    collision_free_match_cnt_2 = 0  # 处理三队查询只能两队无冲的情况
+    outp_render_2 = []
+
+    if len(all_query_records) == 2:
+        try_combinations = []  # [查询1解序号, 查询2解序号, 优先级]
+        for query_1_index, query_1_record in enumerate(all_query_records[0]):
+            for query_2_index, query_2_record in enumerate(all_query_records[1]):
+                val = query_1_record[1] + query_2_record[1]
+                try_combinations.append([query_1_index, query_2_index, val])
+        try_combinations = sorted(try_combinations, key=lambda x: x[-1], reverse=True)
+
+        for try_combination in try_combinations:
+            record_1 = all_query_records[0][try_combination[0]]  # [(1110,1008,1011,1026,1089), 2.105, render] # 或通配
+            record_2 = all_query_records[1][try_combination[1]]
+            team_1 = [] if record_1[0] is None else list(record_1[0])  # (1110,1008,1011,1026,1089)
+            team_2 = [] if record_2[0] is None else list(record_2[0])
+            team_mix = team_1 + team_2  # list
+            if len(team_mix) != len(set(team_mix)):  # 存在冲突
+                continue
+
+            succ = False
+            val = try_combination[-1]
+            if val < -250:
+                break
+            if val < -150:  # 已有0队，要补2队 # 只会出现一次
+                team_recommend_1, team_recommend_2 = recommend2Teams(team_mix)
+                if team_recommend_1 == "placeholder" or team_recommend_2 == "placeholder":
+                    continue
+                record_1[-1] = team_recommend_1
+                record_2[-1] = team_recommend_2
+                succ = True
+            elif val < -50:  # 已有1队，要补1队
+                team_recommend = recommend1Team(team_mix)
+                if team_recommend == "placeholder":
+                    continue
+                if team_1 == []:
+                    record_1[-1] = team_recommend
+                if team_2 == []:
+                    record_2[-1] = team_recommend
+                succ = True
+            else:  # 已有2队
+                succ = True
+
+            if succ:
+                collision_free_match_cnt += 1
+                outp_render += [record_1[-1], record_2[-1], []]
+                if collision_free_match_cnt >= 8:
+                    break
+
+    if len(all_query_records) == 3:
+        try_combinations = []  # [查询1解序号, 查询2解序号, 查询3解序号, 优先级]
+        for query_1_index, query_1_record in enumerate(all_query_records[0]):
+            for query_2_index, query_2_record in enumerate(all_query_records[1]):
+                for query_3_index, query_3_record in enumerate(all_query_records[2]):
+                    val = query_1_record[1] + query_2_record[1] + query_3_record[1]
+                    try_combinations.append([query_1_index, query_2_index, query_3_index, val])
+        try_combinations = sorted(try_combinations, key=lambda x: x[-1], reverse=True)
+
+        for try_combination in try_combinations:
+            record_1 = all_query_records[0][try_combination[0]]  # [(1110,1008,1011,1026,1089), 2.105, render] # 或通配
+            record_2 = all_query_records[1][try_combination[1]]
+            record_3 = all_query_records[2][try_combination[2]]
+            team_1 = [] if record_1[0] is None else list(record_1[0])  # (1110,1008,1011,1026,1089)
+            team_2 = [] if record_2[0] is None else list(record_2[0])
+            team_3 = [] if record_3[0] is None else list(record_3[0])
+            team_mix = team_1 + team_2 + team_3  # list
+            if len(team_mix) != len(set(team_mix)):  # 存在冲突
+                continue
+
+            succ = False
+            val = try_combination[-1]
+            if val < -250:
+                break
+            if val < -150:  # 已有1队，要补2队
+                team_recommend_1, team_recommend_2 = recommend2Teams(team_mix)
+                if team_recommend_1 == "placeholder" or team_recommend_2 == "placeholder":
+                    continue
+                if team_1 != []:
+                    record_2[-1] = team_recommend_1
+                    record_3[-1] = team_recommend_2
+                if team_2 != []:
+                    record_3[-1] = team_recommend_1
+                    record_1[-1] = team_recommend_2
+                if team_3 != []:
+                    record_1[-1] = team_recommend_1
+                    record_2[-1] = team_recommend_2
+                succ = True
+            elif val < -50:  # 已有2队，要补1队 # 此时已有两队无冲
+                team_recommend = recommend1Team(team_mix)
+                if team_recommend == "placeholder":
+                    collision_free_match_cnt_2 += 1
+                    outp_render_2 += [record_1[-1], record_2[-1], record_3[-1], []]
+                else:
+                    if team_1 == []:
+                        record_1[-1] = team_recommend
+                    if team_2 == []:
+                        record_2[-1] = team_recommend
+                    if team_3 == []:
+                        record_3[-1] = team_recommend
+                    succ = True
+            else:  # 已有3队
+                succ = True
+
+            if succ:
+                collision_free_match_cnt += 1
+                outp_render += [record_1[-1], record_2[-1], record_3[-1], []]
+                # print(f'当前无冲配队数={collision_free_match_cnt} len(outp_render)={len(outp_render)}')  # test
+                if collision_free_match_cnt >= 6:
+                    break
+
+    if collision_free_match_cnt:
+        # print(f'\n\n总共无冲配队数={collision_free_match_cnt} len(outp_render)={len(outp_render)}')  # test
+        teams = await render_atk_def_teams(outp_render[:-1])
+        await bot.finish(ev, str(MessageSegment.image(pic2b64(teams))))
+    elif collision_free_match_cnt_2:
+        teams = await render_atk_def_teams(outp_render_2[:-1])
+        await bot.finish(ev, str(MessageSegment.image(pic2b64(teams))))
+    else:
+        if len(all_query_records) == 2:  # 查两队
+            if team_has_result == 0:
+                await bot.finish(ev, "均未查询到解法！")
+            elif team_has_result == 1:
+                for index, records in enumerate(all_query_records):
+                    if len(records) > 1:
+                        await bot.send(ev, f"仅第{index+1}队查询到解法！")
+                        await __arena_query(bot, ev, region, boxDict[index], only_use_cache=True)
+            else:  # 2队有结果，但凑不满2队无冲
+                await bot.send(ev, "无冲配对失败，返回单步查询结果")
+                for index, records in enumerate(all_query_records):
+                    await __arena_query(bot, ev, region, boxDict[index], only_use_cache=True)
+        else:  # 查三队
+            if team_has_result == 1:
+                for index, records in enumerate(all_query_records):
+                    if len(records) > 1:
+                        await bot.send(ev, f"仅第{index+1}队查询到解法！")
+                        await __arena_query(bot, ev, region, boxDict[index], only_use_cache=True)
+            else:  # 2~3队有结果，但凑不满2队无冲
+                await bot.send(ev, "无冲配对失败，返回单步查询结果")
+                for index, records in enumerate(all_query_records):
+                    if len(records) > 1:
+                        await __arena_query(bot, ev, region, boxDict[index], only_use_cache=True)
 
 
 def remove_buffer(uid: str):
@@ -645,38 +802,38 @@ async def __arena_query(bot, ev: CQEvent, region: int, defen="", raw=0, only_use
         await bot.finish(ev, '查询请发送"b/r/tjjc+防守队伍"，无需+号', at_sender=True)
     if len(defen) > 5:
         await bot.finish(ev, '编队不能多于5名角色', at_sender=True)
-    if len(defen) < 5:
-        await bot.finish(ev, '由于数据库限制，少于5名角色的检索条件请移步pcrdfans.com进行查询', at_sender=True)
+    if len(defen) < 4:
+        await bot.finish(ev, '编队角色过少', at_sender=True)
     if len(defen) != len(set(defen)):
         await bot.finish(ev, '编队中含重复角色', at_sender=True)
     if any(chara.is_npc(i) for i in defen):
         await bot.finish(ev, '编队中含未实装角色', at_sender=True)
-    if 1004 in defen:
-        await bot.send(ev, '\n⚠️您正在查询普通版炸弹人\n※万圣版可用万圣炸弹人/瓜炸等别称', at_sender=True)
 
     key = ''.join([str(x) for x in sorted(defen)]) + str(region)
     # 执行查询
     lmt.start_cd(uid)
-    res = await arena.do_query(defen, uid, region, raw, -1 if only_use_cache else 1)
+    res = await arena.do_query(defen, region, -1 if only_use_cache else 1)
+
+    defen = [chara.fromid(x).name for x in defen]
+    defen = f"防守方【{' '.join(defen)}】"
 
     # 处理查询结果
     if res is None:
         remove_buffer(key)
         if not raw:
-            await bot.finish(ev, '数据库未返回数据，请再次尝试查询或前往pcrdfans.com', at_sender=True)
+            await bot.finish(ev, f'{defen}\npcrdfans未返回数据')
         else:
             return []
     if not len(res):
         remove_buffer(key)
         if not raw:
-            await bot.finish(ev, '抱歉没有查询到解法\n作业上传请前往pcrdfans.com', at_sender=True)
+            await bot.finish(ev, f'{defen}\n未查询到解法')
         else:
             return []
 
     res = res[:min(10, len(res))]  # 限制显示数量，截断结果
     if raw:
         return res
-    # print(res)
 
     # 发送回复
     sv.logger.info('Arena generating picture...')
@@ -684,61 +841,14 @@ async def __arena_query(bot, ev: CQEvent, region: int, defen="", raw=0, only_use
     teams = pic2b64(teams)
     teams = MessageSegment.image(teams)
     sv.logger.info('Arena picture ready!')
-    # 纯文字版
-    # atk_team = '\n'.join(map(lambda entry: ' '.join(map(lambda x: f"{x.name}{x.star if x.star else ''}{'专' if x.equip else ''}" , entry['atk'])) , res))
+    msg = [defen, str(teams)]
 
-    # details = [" ".join([
-    #     f"赞{e['up']}+{e['my_up']}" if e['my_up'] else f"赞{e['up']}",
-    #     f"踩{e['down']}+{e['my_down']}" if e['my_down'] else f"踩{e['down']}",
-    #     e['qkey'],
-    #     "你赞过" if e['user_like'] > 0 else "你踩过" if e['user_like'] < 0 else ""
-    # ]) for e in res]
-
-    defen = [chara.fromid(x).name for x in defen]
-    defen = f"防守方【{' '.join(defen)}】"
-    # at = str(MessageSegment.at(ev.user_id))
-
-    msg = [
-        defen,
-        str(teams),
-        # '作业评价：',
-        # *details,
-        # '※发送"点赞/点踩"可进行评价'
-    ]
     if region == 1:
         msg.append('※使用"b怎么拆"或"台怎么拆"可按服过滤')
-    # msg.append('https://www.pcrdfans.com/battle')
 
     sv.logger.debug('Arena sending result...')
     await bot.send(ev, '\n'.join(msg))
     sv.logger.debug('Arena result sent!')
-
-
-# @sv.on_prefix('点赞')
-async def arena_like(bot, ev):
-    await _arena_feedback(bot, ev, 1)
-
-
-# @sv.on_prefix('点踩')
-async def arena_dislike(bot, ev):
-    await _arena_feedback(bot, ev, -1)
-
-
-rex_qkey = re.compile(r'^[0-9a-zA-Z]{5}$')
-
-
-async def _arena_feedback(bot, ev: CQEvent, action: int):
-    action_tip = '赞' if action > 0 else '踩'
-    qkey = ev.message.extract_plain_text().strip()
-    if not qkey:
-        await bot.finish(ev, f'请发送"点{action_tip}+作业id"，如"点{action_tip}ABCDE"，不分大小写', at_sender=True)
-    if not rex_qkey.match(qkey):
-        await bot.finish(ev, f'您要点{action_tip}的作业id不合法', at_sender=True)
-    try:
-        await arena.do_like(qkey, ev.user_id, action)
-    except KeyError:
-        await bot.finish(ev, '无法找到作业id！您只能评价您最近查询过的作业', at_sender=True)
-    await bot.send(ev, '感谢您的反馈！', at_sender=True)
 
 
 @sv.on_fullmatch('竞技场更新卡池')
@@ -761,52 +871,28 @@ async def _update_dic_cron():
         await process_data()
     except Exception as e:
         pass
+    try:
+        global best_atk_records
+        update_record()
+        with open(best_atk_records_path, "r", encoding="utf-8") as fp:
+            best_atk_records = json.load(fp)
+    except:
+        pass
 
 
-@sv.on_command('arena-upload', aliases=('上传作业', '作业上传', '上傳作業', '作業上傳'))
-async def upload(ss: CommandSession):
-    atk_team = ss.get('atk_team', prompt='请输入进攻队+5个表示星级的数字+5个表示专武的0/1 无需空格')
-    def_team = ss.get('def_team', prompt='请输入防守队+5个表示星级的数字+5个表示专武的0/1 无需空格')
-    if 'pic' not in ss.state:
-        ss.state['pic'] = MessageSegment.image(pic2b64(concat_pic([
-            chara.gen_team_pic(atk_team),
-            chara.gen_team_pic(def_team),
-        ])))
-    confirm = ss.get('confirm', prompt=f'{ss.state["pic"]}\n{MessageSegment.at(ss.event.user_id)}确认上传？\n> 确认\n> 取消')
-    # TODO: upload
-    await ss.send('假装上传成功了...')
+# @sv.on_fullmatch('恢复竞技场查询记录')
+def restore_record(bot, ev):
+    curpath = dirname(__file__)
+    bufferpath = join(curpath, 'buffer/')
+    with open(join(bufferpath, "buffer.json"), "r", encoding="utf-8") as fp:
+        buffer = json.load(fp)
 
+    for filename in listdir(bufferpath):
+        if len(filename) != 26:
+            continue
+        filename = filename[:-5]
+        if filename not in buffer:
+            buffer[filename] = 1670000000
 
-@upload.args_parser
-async def _(ss: CommandSession):
-    if ss.is_first_run:
-        await ss.send('我将帮您上传作业至pcrdfans，作业将注明您的昵称及qq。您可以随时发送"算了"或"取消"终止上传。')
-        await asyncio.sleep(0.5)
-        return
-    arg = ss.current_arg_text.strip()
-    if arg == '算了' or arg == '取消':
-        await ss.finish('已取消上传')
-
-    if ss.current_key.endswith('_team'):
-        if len(arg) < 15:
-            return
-        team, star, equip = arg[:-10], arg[-10:-5], arg[-5:]
-        if not re.fullmatch(r'[1-6]{5}', star):
-            await ss.pause('请依次输入5个数字表示星级，顺序与队伍相同')
-        if not re.fullmatch(r'[01]{5}', equip):
-            await ss.pause('请依次输入5个0/1表示专武，顺序与队伍相同')
-        star = [int(s) for s in star]
-        equip = [int(s) for s in equip]
-        team, unknown = chara.roster.parse_team(team)
-        if unknown:
-            _, name, score = chara.guess_id(unknown)
-            await ss.pause(f'无法识别"{unknown}"' if score < 70 else f'无法识别"{unknown}" 您说的有{score}%可能是{name}')
-        if len(team) != 5:
-            await ss.pause('队伍必须由5个角色组成')
-        ss.state[ss.current_key] = [chara.fromid(team[i], star[i], equip[i]) for i in range(5)]
-    elif ss.current_key == 'confirm':
-        if arg == '确认' or arg == '確認':
-            ss.state[ss.current_key] = True
-    else:
-        raise ValueError
-    return
+    with open(join(bufferpath, "buffer.json"), "w", encoding="utf-8") as fp:
+        json.dump(buffer, fp, ensure_ascii=False, indent=4)
