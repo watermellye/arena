@@ -12,8 +12,14 @@ import time
 from os.path import dirname, join, exists
 from random import random
 from math import log
-
+from pathlib import Path
 from asyncio import Lock
+
+_gs_data_dir = Path(__file__).parent / "buffer"
+_gs_data_dir.mkdir(exist_ok=True)
+_gs_cache_filepath = _gs_data_dir / "buffer.json"
+if not _gs_cache_filepath.exists():
+    _gs_cache_filepath.write_text('{}', encoding='utf-8')
 
 querylock = Lock()
 logger = sv.logger
