@@ -16,7 +16,7 @@ def update_dic():
         try:
             ret = re.match(r"^icon_unit_(\d{6}).png$", file)
             icon_id = int(ret.group(1))
-            if (1000 <= icon_id // 100 < 1300) or (1700 < icon_id // 100 < 1900):  # is_npc的判定是(1000,1900)
+            if (1000 <= icon_id // 100 < 1600) or (1700 < icon_id // 100 < 1900):  # is_npc的判定是(1000,1900)
                 icon_list.append([file, icon_id])  # 但此处我们需要识别问号（pjjc用），因此设置为[1000, 1900)
         except:
             continue
